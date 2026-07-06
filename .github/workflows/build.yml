@@ -49,6 +49,7 @@ jobs:
           CONFIG_DEBUG_INFO=y
           CONFIG_PROC_FS=y
           CONFIG_SYSFS=y
+          CONFIG_MODVERSIONS=y
           KCONFIG
 
       - name: Prepare kernel build environment
@@ -56,13 +57,16 @@ jobs:
           cd ~/kernel_source
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
+          # Ensure Module.symvers exists (required for external module modpost)
+          touch Module.symvers
           echo "Kernel ready"
 
       - name: Build module
         run: |
           make -C ~/kernel_source \
             M=$PWD/hwBreakpointProcModule/hwBreakpointProc_module \
-            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules 2>&1 | tee build.log
+            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            KBUILD_MODPOST_WARN=1 modules 2>&1 | tee build.log
 
       - name: Check result
         run: |
