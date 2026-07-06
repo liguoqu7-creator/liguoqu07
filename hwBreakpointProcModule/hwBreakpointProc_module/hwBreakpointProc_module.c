@@ -92,7 +92,7 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
 /*
  * Handle hitting a HW-breakpoint.
  */
-static void hwbp_handler(struct perf_event *bp,
+static __maybe_unused void hwbp_handler(struct perf_event *bp,
 	struct perf_sample_data *data,
 	struct pt_regs *regs) {
 	citerator iter;
@@ -608,7 +608,6 @@ static int hwBreakpointProc_dev_init(void) {
 	start_anti_ptrace_detection(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr);
 #endif
 
-#ifdef CONFIG_DIRECT_HWBP_MODE
 #ifdef CONFIG_DIRECT_HWBP_MODE
 	if (!start_direct_hwbp_handler(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr)) {
 		printk(KERN_EMERG "start_direct_hwbp_handler failed\n");

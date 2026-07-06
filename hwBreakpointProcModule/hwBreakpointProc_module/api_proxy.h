@@ -5,7 +5,7 @@
 
 #ifdef CONFIG_KALLSYMS_LOOKUP_NAME
 #include "kallsyms_lookup_api.h"
-static struct perf_event* x_register_user_hw_breakpoint(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk) {
+static __maybe_unused struct perf_event* x_register_user_hw_breakpoint(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk) {
 	return register_user_hw_breakpoint_sym(attr, triggered, context, tsk);
 }
 
@@ -17,7 +17,7 @@ static int x_modify_user_hw_breakpoint(struct perf_event *bp, struct perf_event_
 	return modify_user_hw_breakpoint_sym(bp, attr);
 }
 #else
-static struct perf_event* x_register_user_hw_breakpoint(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk) {
+static __maybe_unused struct perf_event* x_register_user_hw_breakpoint(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk) {
 	return register_user_hw_breakpoint(attr, triggered, context, tsk);
 }
 
