@@ -1,0 +1,70 @@
+name: Build hwBreakpointProc Kernel Module
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu flex bison bc libssl-dev libelf-dev
+
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: ~/kernel_source
+          key: kernel-oneplus-6.6-v2
+
+      - name: Get kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 \
+            https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650.git \
+            ~/kernel_source 2>&1 || {
+            echo "OnePlus clone failed, trying AOSP common kernel..."
+            git clone --depth=1 --branch android15-6.6 \
+              https://android.googlesource.com/kernel/common \
+              ~/kernel_source
+          }
+
+      - name: Prepare kernel
+        run: |
+          cd ~/kernel_source
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          for cfg in MODULES KPROBES KRETPROBES KALLSYMS HW_BREAKPOINT HAVE_HW_BREAKPOINT PERF_EVENTS; do
+            scripts/config --enable $cfg 2>/dev/null || true
+          done
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
+
+      - name: Build module
+        run: |
+          make -C ~/kernel_source \
+            M=$PWD/hwBreakpointProcModule/hwBreakpointProc_module \
+            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+
+      - name: Check result
+        run: |
+          KO=hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.ko
+          if [ -f "$KO" ]; then
+            echo "BUILD SUCCESS"
+            ls -lh "$KO"
+          else
+            echo "BUILD FAILED"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hwBreakpointProc_module.ko
+          path: hwBreakpointProcModule/hwBreakpointProc_module/hwBreakpointProc_module.ko
+          retention-days: 90
