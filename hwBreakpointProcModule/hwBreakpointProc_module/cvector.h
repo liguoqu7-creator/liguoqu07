@@ -131,12 +131,13 @@ cvector cvector_create(const size_t size)
 	return cv;
 }  
 
-void cvector_destroy(const cvector cv)  
-{  
-	vfree(cv->cv_pdata);  
+void cvector_destroy(const cvector cv)
+{
+	if (!cv) return;
+	vfree(cv->cv_pdata);
 	kfree(cv);
-	return;  
-}  
+	return;
+}
 
 size_t cvector_length(const cvector cv)  
 {  

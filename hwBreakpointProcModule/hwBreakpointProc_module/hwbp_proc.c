@@ -1,4 +1,12 @@
-
+/*
+ * hwbp_proc.c — LEGACY ioctl-based entry point (cdev + device file)
+ *
+ * DEPRECATED: This file is NOT compiled by the current Makefile.
+ * The active entry point is hwBreakpointProc_module.c (procfs-based).
+ * This file is kept for reference / fallback to the traditional ioctl
+ * communication path. If you modify hwBreakpointProc_module.c, sync
+ * relevant changes here too.
+ */
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/fs.h>
@@ -27,6 +35,9 @@
 #include "cvector.h"
 #include "proc_pid.h"
 #include "api_proxy.h"
+#include "hwbp_proc.h"
+#include "kallsyms_lookup_api.h"
+#include "anti_ptrace_detection.h"
 
 
 #define MAJOR_NUM 100
@@ -41,7 +52,10 @@
 #define IOCTL_HWBP_GET_HWBP_HIT_COUNT		_IOR(MAJOR_NUM, 9, char*) //获取硬件断点命中地址数量
 #define IOCTL_HWBP_SET_HOOK_PC						_IOR(MAJOR_NUM, 20, char*)
 
-static atomic64_t g_hook_pc;
+atomic64_t g_hook_pc;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+static atomic64_t g_next_direct_handle = ATOMIC64_INIT(1);
+#endif
 
 
 //////////////////////////////////////////////////////////////////
@@ -79,6 +93,11 @@ static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *re
 		}
     }
 }
+
+#ifdef CONFIG_DIRECT_HWBP_MODE
+#include "direct_hwbp_install.h"
+#include "direct_hwbp_handler.h"
+#endif
 
 #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 static bool arm64_move_bp_to_next_instruction(struct perf_event *bp, uint64_t next_instruction_addr, struct perf_event_attr *original_attr, struct perf_event_attr * next_instruction_attr) {
@@ -252,6 +271,18 @@ static long OnIoctlInstProcessHwbp(unsigned long arg) {
 	hwbp_handle_info.original_attr.bp_type = user_data.hwbp_type;
 	hwbp_handle_info.original_attr.disabled = 0;
 
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	// 直接模式：绕过 perf_event，直接写 ARM64 调试寄存器
+	hwbp_handle_info.sample_hbp = (struct perf_event *)(uintptr_t)
+		atomic64_inc_return(&g_next_direct_handle);
+	if (!direct_hwbp_install(&hwbp_handle_info.original_attr,
+	                          hwbp_handle_info.is_32bit_task,
+	                          &hwbp_handle_info.direct_slot)) {
+		printk_debug(KERN_INFO "direct_hwbp_install failed: no free slot\n");
+		return -EBUSY;
+	}
+#else
+	// 原始 perf_event 路径
 	hwbp_handle_info.sample_hbp = x_register_user_hw_breakpoint(&hwbp_handle_info.original_attr, hwbp_handler, NULL, task);
 	printk_debug(KERN_INFO "register_user_hw_breakpoint return: %px\n", hwbp_handle_info.sample_hbp);
 	if (IS_ERR((void __force *)hwbp_handle_info.sample_hbp)) {
@@ -259,6 +290,7 @@ static long OnIoctlInstProcessHwbp(unsigned long arg) {
 		printk_debug(KERN_INFO "register_user_hw_breakpoint failed: %d\n", ret);
 		return ret;
 	}
+#endif
 	hwbp_handle_info.hit_item_arr = cvector_create(sizeof(struct HWBP_HIT_ITEM));
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	cvector_pushback(g_hwbp_handle_info_arr, &hwbp_handle_info);
@@ -270,26 +302,41 @@ static long OnIoctlInstProcessHwbp(unsigned long arg) {
 }
 
 static long OnIoctlUninstProcessHwbp(unsigned long arg) {
-	struct perf_event * sample_hbp = NULL;
+	uint64_t handle_val = 0;
 	citerator iter;
 	bool found = false;
-	if (copy_from_user(&sample_hbp, (void __user *)arg, 8)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+	struct direct_hwbp_slot saved_slot;
+#endif
+	struct perf_event * bp_to_unreg = NULL;
+	if (copy_from_user(&handle_val, (void __user *)arg, 8)) {
 		return -EFAULT;
 	}
 
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			if(hwbp_handle_info->hit_item_arr) {
 				cvector_destroy(hwbp_handle_info->hit_item_arr);
 				hwbp_handle_info->hit_item_arr = NULL;
 			}
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < 0x10000) {
+				is_direct = true;
+				memcpy(&saved_slot, &hwbp_handle_info->direct_slot, sizeof(saved_slot));
+			} else {
+				bp_to_unreg = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_unreg = hwbp_handle_info->sample_hbp;
+#endif
 			cvector_rm(g_hwbp_handle_info_arr, iter);
 			found = true;
 			break;
@@ -297,39 +344,64 @@ static long OnIoctlUninstProcessHwbp(unsigned long arg) {
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		x_unregister_hw_breakpoint(sample_hbp);
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct)
+			direct_hwbp_disable_slot(&saved_slot);
+		else
+#endif
+			x_unregister_hw_breakpoint(bp_to_unreg);
 	}
 	
 	return 0;
 }
 
 static long OnIoctlSuspendProcessHwbp(unsigned long arg) {
-	struct perf_event * sample_hbp = NULL;
+	uint64_t handle_val = 0;
 	struct perf_event_attr new_instruction_attr;
 	citerator iter;
 	bool found = false;
-	if (copy_from_user(&sample_hbp, (void __user *)arg, 8)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+#endif
+	struct perf_event * bp_to_modify = NULL;
+	if (copy_from_user(&handle_val, (void __user *)arg, 8)) {
 		return -EFAULT;
 	}
 
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			hwbp_handle_info->original_attr.disabled = 1;
 			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < 0x10000) {
+				is_direct = true;
+			} else {
+				bp_to_modify = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_modify = hwbp_handle_info->sample_hbp;
+#endif
 			found = true;
 			break;
 		}
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct) {
+			toggle_bp_registers_directly(&new_instruction_attr,
+				false, 0);
+			return 0;
+		}
+#endif
+		if(!x_modify_user_hw_breakpoint(bp_to_modify, &new_instruction_attr)) {
 			return 0;
 		}
 	}
@@ -337,32 +409,52 @@ static long OnIoctlSuspendProcessHwbp(unsigned long arg) {
 }
 
 static long OnIoctlResumeProcessHwbp(unsigned long arg) {
-	struct perf_event * sample_hbp = NULL;
+	uint64_t handle_val = 0;
 	struct perf_event_attr new_instruction_attr;
 	citerator iter;
 	bool found = false;
-	if (copy_from_user(&sample_hbp, (void __user *)arg, 8)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+#endif
+	struct perf_event * bp_to_modify = NULL;
+	if (copy_from_user(&handle_val, (void __user *)arg, 8)) {
 		return -EFAULT;
 	}
 
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			hwbp_handle_info->original_attr.disabled = 0;
 			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < 0x10000) {
+				is_direct = true;
+			} else {
+				bp_to_modify = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_modify = hwbp_handle_info->sample_hbp;
+#endif
 			found = true;
 			break;
 		}
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct) {
+			toggle_bp_registers_directly(&new_instruction_attr,
+				false, 1);
+			return 0;
+		}
+#endif
+		if(!x_modify_user_hw_breakpoint(bp_to_modify, &new_instruction_attr)) {
 			return 0;
 		}
 	}
@@ -532,9 +624,16 @@ static void clean_hwbp(void) {
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
 		if(hwbp_handle_info->sample_hbp) {
-			cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
-			hwbp_handle_info->sample_hbp = NULL;
-		}
+#ifdef CONFIG_DIRECT_HWBP_MODE
+				if ((uintptr_t)hwbp_handle_info->sample_hbp < 0x10000) {
+					direct_hwbp_disable_slot(&hwbp_handle_info->direct_slot);
+				} else
+#endif
+				{
+					cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
+					hwbp_handle_info->sample_hbp = NULL;
+				}
+			}
 		if(hwbp_handle_info->hit_item_arr) {
 			cvector_destroy(hwbp_handle_info->hit_item_arr);
 			hwbp_handle_info->hit_item_arr = NULL;
@@ -613,6 +712,13 @@ int __init hwBreakpointProc_dev_init(void) {
 	start_anti_ptrace_detection(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr);
 #endif
 
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	if (!start_direct_hwbp_handler(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr)) {
+		printk(KERN_EMERG "start_direct_hwbp_handler failed\n");
+		return -EBADF;
+	}
+#endif
+
 	result = alloc_chrdev_region(&g_hwBreakpointProc_devno, 0, 1, DEV_FILENAME);
 	g_hwBreakpointProc_major = MAJOR(g_hwBreakpointProc_devno);
 
@@ -661,6 +767,10 @@ void __exit hwBreakpointProc_dev_exit(void) {
 	
 #ifdef CONFIG_ANTI_PTRACE_DETECTION_MODE
 	stop_anti_ptrace_detection();
+#endif
+
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	stop_direct_hwbp_handler();
 #endif
 
 	clean_hwbp();

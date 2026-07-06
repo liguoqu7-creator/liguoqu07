@@ -1,6 +1,13 @@
 #ifndef _HWBP_PROC_H_
 #define _HWBP_PROC_H_
 #include "ver_control.h"
+#ifdef CONFIG_DIRECT_HWBP_MODE
+#include "direct_hwbp_core.h"
+#endif
+
+// 直接模式句柄阈值：小于此值的句柄为直接模式伪句柄（非 perf_event 指针）
+// perf_event 指针在内核地址空间，远大于此值
+#define DIRECT_HWBP_HANDLE_THRESHOLD  0x10000ULL
 
 #pragma pack(1)
 struct my_user_pt_regs {
@@ -29,6 +36,9 @@ struct HWBP_HANDLE_INFO {
 #endif
 	size_t hit_total_count;
 	cvector hit_item_arr;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	struct direct_hwbp_slot direct_slot; // 直接模式槽位信息 (sample_hbp==NULL 时有效)
+#endif
 };
 
 #endif

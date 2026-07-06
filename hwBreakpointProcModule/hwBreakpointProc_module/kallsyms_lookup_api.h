@@ -14,8 +14,13 @@
 static unsigned long (*kallsyms_lookup_name_sym)(const char *name);
 static struct perf_event* (*register_user_hw_breakpoint_sym)(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk);
 static void (*unregister_hw_breakpoint_sym)(struct perf_event *bp);
-#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 static int (*modify_user_hw_breakpoint_sym)(struct perf_event *bp, struct perf_event_attr *attr);
+
+// ===== Direct HWBP mode additions =====
+#ifdef CONFIG_DIRECT_HWBP_MODE
+static void (*g_migrate_disable_sym)(void);
+static void (*g_migrate_enable_sym)(void);
+static void (*g_smp_call_function_sym)(void (*func)(void *info), void *info, int wait);
 #endif
 
 static int _kallsyms_lookup_kprobe(struct kprobe *p, struct pt_regs *regs) { return 0; }
@@ -53,10 +58,30 @@ static bool init_kallsyms_lookup(void) {
 	printk_debug(KERN_EMERG "unregister_hw_breakpoint_sym:%px\n", unregister_hw_breakpoint_sym);
 	if(!unregister_hw_breakpoint_sym) { return false; }
 
-#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 	modify_user_hw_breakpoint_sym = (void *)generic_kallsyms_lookup_name("modify_user_hw_breakpoint");
 	printk_debug(KERN_EMERG "modify_user_hw_breakpoint_sym:%px\n", modify_user_hw_breakpoint_sym);
 	if(!modify_user_hw_breakpoint_sym) { return false; }
+
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	// 下列符号为可选项 -- 解析失败仅打印警告，不阻止模块加载
+	g_migrate_disable_sym = (void *)generic_kallsyms_lookup_name("migrate_disable");
+	printk_debug(KERN_EMERG "migrate_disable_sym:%px\n", g_migrate_disable_sym);
+	if (!g_migrate_disable_sym) {
+			printk(KERN_EMERG "hwBreakpointProc: migrate_disable not found, required for CONFIG_DIRECT_HWBP_MODE\n");
+			return false;
+		}
+
+		g_migrate_enable_sym = (void *)generic_kallsyms_lookup_name("migrate_enable");
+		printk_debug(KERN_EMERG "migrate_enable_sym:%px\n", g_migrate_enable_sym);
+		if (!g_migrate_enable_sym) {
+			printk(KERN_EMERG "hwBreakpointProc: migrate_enable not found, required for CONFIG_DIRECT_HWBP_MODE\n");
+			return false;
+		}
+
+	g_smp_call_function_sym = (void *)generic_kallsyms_lookup_name("smp_call_function");
+	printk_debug(KERN_EMERG "smp_call_function_sym:%px\n", g_smp_call_function_sym);
+	if (!g_smp_call_function_sym)
+		printk(KERN_WARNING "hwBreakpointProc: smp_call_function not found, BP local CPU only\n");
 #endif
 
 	return true;

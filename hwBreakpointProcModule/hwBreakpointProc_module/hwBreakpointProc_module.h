@@ -24,6 +24,9 @@
 #include "ver_control.h"
 #include "arm64_register_helper.h"
 #include "cvector.h"
+#ifdef CONFIG_DIRECT_HWBP_MODE
+#include "direct_hwbp_core.h"
+#endif
 #ifdef CONFIG_USE_PROC_FILE_NODE
 #include <linux/proc_fs.h>
 #include "hide_procfs_dir.h"
@@ -43,6 +46,18 @@ enum {
 	CMD_GET_HWBP_HIT_DETAIL,		// 获取硬件断点命中详细信息
 	CMD_SET_HOOK_PC,				// 设置无条件Hook跳转
 	CMD_HIDE_KERNEL_MODULE,			// 隐藏驱动
+
+	// ===== rwProcMem33 内存读写命令 (ID从100开始，避免和断点命令冲突) =====
+	CMD_RW_INIT_DEVICE_INFO = 100,		// 初始化设备信息（自动探测内核偏移）
+	CMD_RW_READ_PROCESS_MEMORY,			// 读取进程内存
+	CMD_RW_WRITE_PROCESS_MEMORY,		// 写入进程内存
+	CMD_RW_GET_PROCESS_MAPS_COUNT,		// 获取进程内存块数量
+	CMD_RW_GET_PROCESS_MAPS_LIST,		// 获取进程内存块列表
+	CMD_RW_CHECK_PROCESS_ADDR_PHY,		// 检查地址是否有物理页
+	CMD_RW_GET_PID_LIST,				// 获取系统所有进程PID
+	CMD_RW_SET_PROCESS_ROOT,			// 提升进程到Root权限
+	CMD_RW_GET_PROCESS_RSS,				// 获取进程物理内存占用
+	CMD_RW_GET_PROCESS_CMDLINE_ADDR,	// 获取进程命令行地址
 };
 
 struct hwBreakpointProcDev {
@@ -88,6 +103,9 @@ struct HWBP_HANDLE_INFO {
 #endif
 	size_t hit_total_count;
 	cvector hit_item_arr;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	struct direct_hwbp_slot direct_slot; // 直接模式槽位信息 (sample_hbp==NULL 时有效)
+#endif
 };
 
 #endif /* _HWBP_PROC_H_ */

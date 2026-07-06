@@ -1,6 +1,7 @@
 #ifndef _API_PROXY_H_
 #define _API_PROXY_H_
 #include "ver_control.h"
+#include "linux_kernel_api.h"
 
 #ifdef CONFIG_KALLSYMS_LOOKUP_NAME
 #include "kallsyms_lookup_api.h"

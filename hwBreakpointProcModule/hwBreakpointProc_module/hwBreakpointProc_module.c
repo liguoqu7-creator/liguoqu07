@@ -21,13 +21,13 @@ static atomic64_t g_hook_pc;
 static struct mutex g_hwbp_handle_info_mutex;
 static cvector g_hwbp_handle_info_arr = NULL;
 
-static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *regs) {
+static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *regs, uint64_t hit_addr) {
     struct HWBP_HIT_ITEM hit_item = {0};
 	if (!info || !regs) {
         return;
     }
 	hit_item.task_id = info->task_id;
-    hit_item.hit_addr = regs->pc;
+    hit_item.hit_addr = hit_addr ? hit_addr : regs->pc;
 	hit_item.hit_time = ktime_get_real_seconds();
     memcpy(&hit_item.regs_info.regs, regs->regs, sizeof(hit_item.regs_info.regs));
     hit_item.regs_info.sp = regs->sp;
@@ -79,7 +79,7 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
 	struct perf_sample_data *data,
 	struct pt_regs *regs, struct HWBP_HANDLE_INFO * hwbp_handle_info) {
 	hwbp_handle_info->hit_total_count++;
-	record_hit_details(hwbp_handle_info, regs);
+	record_hit_details(hwbp_handle_info, regs, 0);
 }
 
 /*
@@ -229,23 +229,38 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 }
 
 static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
-	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+	uint64_t handle_val = hdr->param1;
 	citerator iter;
 	bool found = false;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+	struct direct_hwbp_slot saved_slot;
+#endif
+	struct perf_event * bp_to_unreg = NULL;
 	printk_debug(KERN_INFO "CMD_UNINST_PROCESS_HWBP\n");
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			if(hwbp_handle_info->hit_item_arr) {
 				cvector_destroy(hwbp_handle_info->hit_item_arr);
 				hwbp_handle_info->hit_item_arr = NULL;
 			}
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < DIRECT_HWBP_HANDLE_THRESHOLD) {
+				is_direct = true;
+				memcpy(&saved_slot, &hwbp_handle_info->direct_slot, sizeof(saved_slot));
+			} else {
+				bp_to_unreg = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_unreg = hwbp_handle_info->sample_hbp;
+#endif
 			cvector_rm(g_hwbp_handle_info_arr, iter);
 			found = true;
 			break;
@@ -253,36 +268,63 @@ static ssize_t OnCmdUninstProcessHwbp(struct ioctl_request *hdr, char __user* bu
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		x_unregister_hw_breakpoint(sample_hbp);
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct)
+			direct_hwbp_disable_slot(&saved_slot);
+		else
+#endif
+			x_unregister_hw_breakpoint(bp_to_unreg);
 	}
 	
 	return 0;
 }
 
 static ssize_t OnCmdSuspendProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
-	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+	uint64_t handle_val = hdr->param1;
 	struct perf_event_attr new_instruction_attr;
 	citerator iter;
 	bool found = false;
+	bool saved_is_32bit = false;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+#endif
+	struct perf_event * bp_to_modify = NULL;
 	printk_debug(KERN_INFO "CMD_SUSPEND_PROCESS_HWBP\n");
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			hwbp_handle_info->original_attr.disabled = 1;
+			saved_is_32bit = hwbp_handle_info->is_32bit_task;
 			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < DIRECT_HWBP_HANDLE_THRESHOLD) {
+				is_direct = true;
+			} else {
+				bp_to_modify = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_modify = hwbp_handle_info->sample_hbp;
+#endif
 			found = true;
 			break;
 		}
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct) {
+			toggle_bp_registers_directly(&new_instruction_attr,
+				saved_is_32bit, 0);
+			return 0;
+		}
+#endif
+		if(!x_modify_user_hw_breakpoint(bp_to_modify, &new_instruction_attr)) {
 			return 0;
 		}
 	}
@@ -290,29 +332,51 @@ static ssize_t OnCmdSuspendProcessHwbp(struct ioctl_request *hdr, char __user* b
 }
 
 static ssize_t OnCmdResumeProcessHwbp(struct ioctl_request *hdr, char __user* buf) {
-	struct perf_event * sample_hbp = (struct perf_event *)hdr->param1;
+	uint64_t handle_val = hdr->param1;
 	struct perf_event_attr new_instruction_attr;
 	citerator iter;
 	bool found = false;
+	bool saved_is_32bit = false;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	bool is_direct = false;
+#endif
+	struct perf_event * bp_to_modify = NULL;
 	printk_debug(KERN_INFO "CMD_RESUME_PROCESS_HWBP\n");
-	printk_debug(KERN_INFO "sample_hbp *:%px\n", sample_hbp);
-	if(!sample_hbp) {
+	printk_debug(KERN_INFO "handle_val:%llx\n", handle_val);
+	if(!handle_val) {
 		return -EFAULT;
 	}
 
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp == sample_hbp) {
+		if((uintptr_t)hwbp_handle_info->sample_hbp == handle_val) {
 			hwbp_handle_info->original_attr.disabled = 0;
+			saved_is_32bit = hwbp_handle_info->is_32bit_task;
 			memcpy(&new_instruction_attr, &hwbp_handle_info->original_attr, sizeof(struct perf_event_attr));
+#ifdef CONFIG_DIRECT_HWBP_MODE
+			if (handle_val < DIRECT_HWBP_HANDLE_THRESHOLD) {
+				is_direct = true;
+			} else {
+				bp_to_modify = hwbp_handle_info->sample_hbp;
+			}
+#else
+			bp_to_modify = hwbp_handle_info->sample_hbp;
+#endif
 			found = true;
 			break;
 		}
 	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	if(found) {
-		if(!x_modify_user_hw_breakpoint(sample_hbp, &new_instruction_attr)) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+		if (is_direct) {
+			toggle_bp_registers_directly(&new_instruction_attr,
+				saved_is_32bit, 1);
+			return 0;
+		}
+#endif
+		if(!x_modify_user_hw_breakpoint(bp_to_modify, &new_instruction_attr)) {
 			return 0;
 		}
 	}
@@ -468,10 +532,17 @@ static void clean_hwbp(void) {
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	for (iter = cvector_begin(g_hwbp_handle_info_arr); iter != cvector_end(g_hwbp_handle_info_arr); iter = cvector_next(g_hwbp_handle_info_arr, iter)) {
 		struct HWBP_HANDLE_INFO * hwbp_handle_info = (struct HWBP_HANDLE_INFO *)iter;
-		if(hwbp_handle_info->sample_hbp) {
-			cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
-			hwbp_handle_info->sample_hbp = NULL;
-		}
+			if(hwbp_handle_info->sample_hbp) {
+#ifdef CONFIG_DIRECT_HWBP_MODE
+				if ((uintptr_t)hwbp_handle_info->sample_hbp < DIRECT_HWBP_HANDLE_THRESHOLD) {
+					direct_hwbp_disable_slot(&hwbp_handle_info->direct_slot);
+				} else
+#endif
+				{
+					cvector_pushback(wait_unregister_bp_arr, &hwbp_handle_info->sample_hbp);
+					hwbp_handle_info->sample_hbp = NULL;
+				}
+			}
 		if(hwbp_handle_info->hit_item_arr) {
 			cvector_destroy(hwbp_handle_info->hit_item_arr);
 			hwbp_handle_info->hit_item_arr = NULL;
@@ -492,6 +563,11 @@ static int hwBreakpointProc_release(struct inode *inode, struct file *filp) {
 	clean_hwbp();
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	g_hwbp_handle_info_arr = cvector_create(sizeof(struct HWBP_HANDLE_INFO));
+	if (!g_hwbp_handle_info_arr) {
+		printk(KERN_EMERG "hwBreakpointProc: cvector_create failed\n");
+		mutex_unlock(&g_hwbp_handle_info_mutex);
+		return -ENOMEM;
+	}
 	mutex_unlock(&g_hwbp_handle_info_mutex);
 	return 0;
 }
@@ -504,6 +580,10 @@ static int hwBreakpointProc_dev_init(void) {
 	}
 #endif
 	g_hwbp_handle_info_arr = cvector_create(sizeof(struct HWBP_HANDLE_INFO));
+	if (!g_hwbp_handle_info_arr) {
+		printk(KERN_EMERG "hwBreakpointProc: cvector_create failed\n");
+		return -ENOMEM;
+	}
 	mutex_init(&g_hwbp_handle_info_mutex);
 
 #ifdef CONFIG_ANTI_PTRACE_DETECTION_MODE

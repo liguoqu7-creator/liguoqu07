@@ -22,6 +22,10 @@
 // 反PTRACE侦测模式
 #define CONFIG_ANTI_PTRACE_DETECTION_MODE
 
+// 直接硬件断点模式（绕过perf_event，直接写ARM64调试寄存器 + Hook do_debug_exception）
+// 开启后完全无痕：不在thread_struct中留调试记录
+#define CONFIG_DIRECT_HWBP_MODE
+
 #ifndef KERNEL_VERSION
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
 #endif
@@ -51,7 +55,7 @@
 #ifdef CONFIG_DEBUG_PRINTK
 #define printk_debug printk
 #else
-static inline void printk_debug(char *fmt, ...) {}
+static inline void printk_debug(const char *fmt, ...) {}
 #endif
 
 #endif /* VER_CONTROL_H_ */
