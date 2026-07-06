@@ -42,6 +42,10 @@ static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *re
     }
 }
 
+#ifdef CONFIG_DIRECT_HWBP_MODE
+#include "direct_hwbp_handler.h"
+#endif
+
 #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 static bool arm64_move_bp_to_next_instruction(struct perf_event *bp, uint64_t next_instruction_addr, struct perf_event_attr *original_attr, struct perf_event_attr * next_instruction_attr) {
     int result;
