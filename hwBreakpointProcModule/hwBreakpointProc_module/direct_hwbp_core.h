@@ -25,11 +25,18 @@ struct direct_hwbp_slot {
 };
 
 // ======================== MDSCR_EL1 位定义 ========================
+// 这些宏在较新内核 (<asm/debug-monitors.h>) 中已有定义，加 #ifndef 防护
+#ifndef DBG_MDSCR_SS
 #define DBG_MDSCR_SS       (1UL << 0)    // Single-Step enable
+#endif
+#ifndef DBG_MDSCR_MDE
 #define DBG_MDSCR_MDE      (1UL << 15)   // Monitor Debug Enable (必须使能)
+#endif
 
 // ======================== SPSR (pstate) 单步位 ========================
+#ifndef DBG_SPSR_SS
 #define DBG_SPSR_SS        (1UL << 21)   // ARM64 SPSR.SS bit
+#endif
 
 // ======================== ESR_EL1 调试事件类型 (bit[29:27]) ========================
 #define ESR_EVT_HWBP       0x0           // Hardware Breakpoint (执行断点)

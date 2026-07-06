@@ -26,6 +26,8 @@
 #include "cvector.h"
 #ifdef CONFIG_DIRECT_HWBP_MODE
 #include "direct_hwbp_core.h"
+// 直接模式句柄阈值：小于此值为直接模式伪句柄（非 perf_event 指针）
+#define DIRECT_HWBP_HANDLE_THRESHOLD  0x10000ULL
 #endif
 #ifdef CONFIG_USE_PROC_FILE_NODE
 #include <linux/proc_fs.h>

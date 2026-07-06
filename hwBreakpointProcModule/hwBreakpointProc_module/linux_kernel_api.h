@@ -8,7 +8,7 @@
  
 long probe_kernel_read(void* dst, const void* src, size_t size);
  
-static long x_probe_kernel_read(void* bounce, const char* ptr, size_t sz) {
+static __maybe_unused long x_probe_kernel_read(void* bounce, const char* ptr, size_t sz) {
     return probe_kernel_read(bounce, ptr, sz);
 }
  
@@ -18,7 +18,7 @@ static long x_probe_kernel_read(void* bounce, const char* ptr, size_t sz) {
  
 long copy_from_kernel_nofault(void* dst, const void* src, size_t size);
  
-static long x_probe_kernel_read(void* bounce, const char* ptr, size_t sz) {
+static __maybe_unused long x_probe_kernel_read(void* bounce, const char* ptr, size_t sz) {
     return copy_from_kernel_nofault(bounce, ptr, sz);
 }
  
@@ -37,7 +37,7 @@ static inline pte_t x_pte_mkwrite(pte_t pte) {
 #endif
 
 #if MY_LINUX_VERSION_CODE < KERNEL_VERSION(6,6,0)
-static size_t x_read_mm_struct_rss(struct mm_struct * mm, ssize_t offset) {
+static __maybe_unused size_t x_read_mm_struct_rss(struct mm_struct * mm, ssize_t offset) {
         struct mm_rss_stat *rss_stat = (struct mm_rss_stat *)((size_t)&mm->rss_stat + offset);
         size_t total_rss;
 		ssize_t val1, val2, val3;
@@ -55,7 +55,7 @@ static size_t x_read_mm_struct_rss(struct mm_struct * mm, ssize_t offset) {
         return total_rss;
 }
 #else
-static size_t x_read_mm_struct_rss(struct mm_struct * mm, ssize_t offset) {
+static __maybe_unused size_t x_read_mm_struct_rss(struct mm_struct * mm, ssize_t offset) {
         struct percpu_counter *rss_stat = (struct percpu_counter *)((size_t)&mm->rss_stat + offset);
         size_t total_rss;
 		ssize_t val1, val2, val3;
