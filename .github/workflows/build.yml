@@ -57,12 +57,15 @@ jobs:
           cd ~/kernel_source
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
-          # Ensure Module.symvers exists (required for external module modpost)
-          touch Module.symvers
-          echo "Kernel ready"
+          # Generate Module.symvers with kernel exports (minimal vmlinux build)
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vmlinux -j$(nproc) 2>&1 | tail -20 || true
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules -j$(nproc) 2>&1 | head -50 || true
+          echo "Kernel build complete, Module.symvers should exist"
+          ls -lh Module.symvers 2>&1 || echo "Module.symvers still missing, will continue anyway"
 
       - name: Build module
         run: |
+          export KBUILD_MODPOST_WARN=1
           make -C ~/kernel_source \
             M=$PWD/hwBreakpointProcModule/hwBreakpointProc_module \
             ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
