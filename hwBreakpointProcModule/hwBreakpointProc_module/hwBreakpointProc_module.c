@@ -16,6 +16,9 @@ struct ioctl_request {
 //////////////////////////////////////////////////////////////////
 
 static atomic64_t g_hook_pc;
+#ifdef CONFIG_DIRECT_HWBP_MODE
+static atomic64_t g_next_direct_handle = ATOMIC64_INIT(1);
+#endif
 
 
 static struct mutex g_hwbp_handle_info_mutex;
@@ -214,6 +217,17 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 	hwbp_handle_info.original_attr.bp_type = hwbp_type;
 	hwbp_handle_info.original_attr.disabled = 0;
 
+	#ifdef CONFIG_DIRECT_HWBP_MODE
+		hwbp_handle_info.sample_hbp = (struct perf_event *)(uintptr_t)
+			atomic64_inc_return(&g_next_direct_handle);
+		if (!direct_hwbp_install(&hwbp_handle_info.original_attr,
+		                          hwbp_handle_info.is_32bit_task,
+		                          &hwbp_handle_info.direct_slot)) {
+			printk_debug(KERN_INFO "direct_hwbp_install failed: no free slot
+");
+			return -EBUSY;
+		}
+	#else
 	hwbp_handle_info.sample_hbp = x_register_user_hw_breakpoint(&hwbp_handle_info.original_attr, hwbp_handler, NULL, task);
 	printk_debug(KERN_INFO "register_user_hw_breakpoint return: %px\n", hwbp_handle_info.sample_hbp);
 	if (IS_ERR((void __force *)hwbp_handle_info.sample_hbp)) {
@@ -221,6 +235,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 		printk_debug(KERN_INFO "register_user_hw_breakpoint failed: %d\n", ret);
 		return ret;
 	}
+	#endif
 	hwbp_handle_info.hit_item_arr = cvector_create(sizeof(struct HWBP_HIT_ITEM));
 	mutex_lock(&g_hwbp_handle_info_mutex);
 	cvector_pushback(g_hwbp_handle_info_arr, &hwbp_handle_info);
@@ -594,6 +609,17 @@ static int hwBreakpointProc_dev_init(void) {
 	start_anti_ptrace_detection(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr);
 #endif
 
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	stop_direct_hwbp_handler();
+#endif
+
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	if (!start_direct_hwbp_handler(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr)) {
+		printk(KERN_EMERG "start_direct_hwbp_handler failed\n");
+		return -EBADF;
+	}
+#endif
+
 	g_hwBreakpointProc_devp = x_kmalloc(sizeof(struct hwBreakpointProcDev), GFP_KERNEL);
 	memset(g_hwBreakpointProc_devp, 0, sizeof(struct hwBreakpointProcDev));
 
@@ -621,6 +647,10 @@ static void hwBreakpointProc_dev_exit(void) {
 	
 #ifdef CONFIG_ANTI_PTRACE_DETECTION_MODE
 	stop_anti_ptrace_detection();
+#endif
+
+#ifdef CONFIG_DIRECT_HWBP_MODE
+	stop_direct_hwbp_handler();
 #endif
 
 	clean_hwbp();

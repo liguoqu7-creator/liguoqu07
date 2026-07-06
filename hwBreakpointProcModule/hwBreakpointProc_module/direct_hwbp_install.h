@@ -144,7 +144,7 @@ static void direct_hwbp_disable_slot(struct direct_hwbp_slot *slot) {
 
 // ======================== 全核启用 ========================
 
-static void direct_hwbp_enable_slot(struct direct_hwbp_slot *slot) {
+static __maybe_unused void direct_hwbp_enable_slot(struct direct_hwbp_slot *slot) {
     struct smp_bp_data data;
     data.slot_index    = slot->slot_index;
     data.is_watchpoint = slot->is_watchpoint;
