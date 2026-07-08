@@ -94,16 +94,12 @@ static uint64_t calc_hw_addr(const struct perf_event_attr* attr, bool is_32bit_t
 	if(!attr) {
 		return 0;
 	}
-	if (is_32bit_task) {
-		if (attr->bp_len == HW_BREAKPOINT_LEN_8)
-			alignment_mask = 0x7;
-		else
-			alignment_mask = 0x3;
+	if (attr->type == HW_BREAKPOINT_X) {
+		// 执行断点: 指令地址始终 4 字节对齐 (A32/A64)
+		alignment_mask = 0x3;
 	} else {
-		if (attr->type == HW_BREAKPOINT_X)
-			alignment_mask = 0x3;
-		else
-			alignment_mask = 0x7;
+		// 监视点: DBGWVR 要求 8 字节对齐, 与 AArch32/AArch64 无关
+		alignment_mask = 0x7;
 	}
 	hw_addr = attr->bp_addr;
 	hw_addr &= ~alignment_mask;

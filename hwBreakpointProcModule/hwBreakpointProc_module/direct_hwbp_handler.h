@@ -64,8 +64,10 @@ direct_hwbp_find_handle_by_addr(uint64_t hw_addr, bool is_watchpoint) {
          iter = cvector_next(*g_p_direct_hwbp_cv, iter))
     {
         struct HWBP_HANDLE_INFO *info = (struct HWBP_HANDLE_INFO *)iter;
-        // NULL sample_hbp → 直接模式标记
-        if (info->sample_hbp != NULL)
+        // 只处理直接模式条目：sample_hbp 为伪句柄（小整数 < THRESHOLD）
+        // 跳过 perf_event 条目（sample_hbp 是真正的内核指针 >= THRESHOLD）
+        if (info->sample_hbp == NULL ||
+            (uintptr_t)info->sample_hbp >= DIRECT_HWBP_HANDLE_THRESHOLD)
             continue;
 
         uint64_t check_addr = calc_hw_addr(&info->original_attr,
@@ -93,7 +95,9 @@ static void direct_hwbp_toggle_all_on_cpu(bool enable) {
          iter = cvector_next(*g_p_direct_hwbp_cv, iter))
     {
         struct HWBP_HANDLE_INFO *info = (struct HWBP_HANDLE_INFO *)iter;
-        if (info->sample_hbp != NULL)  // skip perf_event entries
+        // 只处理直接模式条目（伪句柄 < THRESHOLD），跳过 perf_event 条目
+        if (info->sample_hbp == NULL ||
+            (uintptr_t)info->sample_hbp >= DIRECT_HWBP_HANDLE_THRESHOLD)
             continue;
 
         toggle_bp_registers_directly(&info->original_attr,
@@ -105,7 +109,7 @@ static void direct_hwbp_toggle_all_on_cpu(bool enable) {
 // ======================== kretprobe entry_handler ========================
 // 在 do_debug_exception 执行前拦截。
 // ARM64 调用约定：arg0=addr(regs[0]), arg1=esr(regs[1]), arg2=pt_regs(regs[2])
-// kprobe 框架已禁用抢占，使用 get_cpu()/put_cpu() 做双重保护并获取稳定的 CPU 编号
+// kprobe 框架已禁用抢占并绑定 CPU，smp_processor_id() 安全
 
 static int entry_do_debug_exception(struct kretprobe_instance *ri,
                                      struct pt_regs *regs)
@@ -122,10 +126,9 @@ static int entry_do_debug_exception(struct kretprobe_instance *ri,
     data->esr_save = esr;
     data->intercepted = false;
 
-    // get_cpu() 禁用抢占并返回当前 CPU 编号，即使 kprobe 已禁用抢占也做双重保护
-    cpu = get_cpu();
+    // kprobe 框架已禁用抢占且绑定 CPU，smp_processor_id() 安全
+    cpu = smp_processor_id();
     if (cpu >= NR_CPUS) {
-        put_cpu();
         return 0;  // 不应该发生
     }
     cpu_state = &g_per_cpu_step[cpu];
@@ -136,7 +139,6 @@ static int entry_do_debug_exception(struct kretprobe_instance *ri,
         target_regs->pc = hook_pc;
         data->intercepted = true;
         regs->regs[1] = 0;  // 清零 ESR，原函数无害返回
-        put_cpu();
         return 0;
     }
 
@@ -167,7 +169,6 @@ static int entry_do_debug_exception(struct kretprobe_instance *ri,
 
             data->intercepted = true;
             regs->regs[1] = 0;
-            put_cpu();
             return 0;
         }
     }
@@ -204,7 +205,6 @@ static int entry_do_debug_exception(struct kretprobe_instance *ri,
 
             data->intercepted = true;
             regs->regs[1] = 0;  // 清零 ESR
-            put_cpu();
             return 0;
         }
     }
@@ -242,13 +242,11 @@ static int entry_do_debug_exception(struct kretprobe_instance *ri,
 
             data->intercepted = true;
             regs->regs[1] = 0;
-            put_cpu();
             return 0;
         }
     }
 
     // 不是我们的断点 → 原样执行 do_debug_exception
-    put_cpu();
     return 0;
 }
 

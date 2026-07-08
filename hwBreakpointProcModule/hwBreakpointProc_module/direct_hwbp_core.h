@@ -38,10 +38,15 @@ struct direct_hwbp_slot {
 #define DBG_SPSR_SS        (1UL << 21)   // ARM64 SPSR.SS bit
 #endif
 
-// ======================== ESR_EL1 调试事件类型 (bit[29:27]) ========================
+// ======================== ESR_EL1 调试事件类型 ========================
+// ESR_EL1 Exception Class (EC) 在 bits[31:26]。
+// 调试异常 EC 值（忽略 EL 来源位 bit0）：
+//   0x30/0x31 = Breakpoint, 0x32/0x33 = Single-Step, 0x34/0x35 = Watchpoint
+// 归一化为 0/1/2，分别对应断点、单步、监视点。
 #define ESR_EVT_HWBP       0x0           // Hardware Breakpoint (执行断点)
 #define ESR_EVT_HWSS       0x1           // Hardware Single-Step
 #define ESR_EVT_HWWP       0x2           // Hardware Watchpoint (访问监视点)
+#define ESR_EVT_UNKNOWN    0xFF          // 非调试事件
 
 // ======================== DBGWCR 控制位布局 ========================
 // bit 0      : E    (Enable)
@@ -93,9 +98,17 @@ static inline void clear_spsr_ss_bit(struct pt_regs *regs) {
 }
 
 // ======================== ESR 事件类型解码 ========================
+// 从 ESR_EL1 的 Exception Class 字段识别调试事件类型。
+// EC 在 bits[31:26]；bit0 区分 lower EL / same EL，我们忽略 bit0 归一化处理。
 
 static inline unsigned int esr_to_debug_evt(unsigned long esr) {
-    return (esr >> 27) & 0x7;
+    unsigned int ec = (esr >> 26) & 0x3F;  // Exception Class, bits[31:26]
+    switch (ec & 0x3E) {                   // mask off bit0 (EL origin)
+    case 0x30: return ESR_EVT_HWBP;        // Breakpoint (0x30/0x31)
+    case 0x32: return ESR_EVT_HWSS;        // Single-Step (0x32/0x33)
+    case 0x34: return ESR_EVT_HWWP;        // Watchpoint (0x34/0x35)
+    default:   return ESR_EVT_UNKNOWN;
+    }
 }
 
 // ======================== DBGWCR 控制字构建 ========================
@@ -119,7 +132,7 @@ static inline uint32_t build_wcr(int bp_type, int bp_len, uint64_t addr) {
     default: break;
     }
 
-    // BAS: byte address select within 8-byte aligned window
+    // BAS: byte address select within 8-byte aligned window (bits [12:5])
     byte_offset = addr & 0x7;
     switch (bp_len) {
     case HW_BREAKPOINT_LEN_1: bas = (1U << byte_offset);           break;
@@ -127,6 +140,12 @@ static inline uint32_t build_wcr(int bp_type, int bp_len, uint64_t addr) {
     case HW_BREAKPOINT_LEN_4: bas = (0xFU << byte_offset);         break;
     case HW_BREAKPOINT_LEN_8: bas = 0xFF;                          break;
     default: break;
+    }
+    // Validate BAS fits in the 8-bit field at bits [12:5]
+    if (bas > 0xFF) {
+        printk_debug(KERN_WARNING "build_wcr: BAS overflow (addr=0x%llx len=%d)\n",
+                     addr, bp_len);
+        bas = 0;  // SAFETY: no bytes matched, watchpoint will be silently disabled
     }
     wcr |= (bas << 5);
 
